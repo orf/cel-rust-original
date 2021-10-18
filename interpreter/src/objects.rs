@@ -5,14 +5,16 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::rc::Rc;
+use crate::InterpreterError;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct CelMap {
     pub map: Rc<HashMap<CelKey, CelType>>,
 }
 
+
 impl PartialOrd for CelMap {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    fn partial_cmp(&self, _other: &Self) -> Option<Ordering> {
         None
     }
 }
@@ -26,7 +28,7 @@ pub enum CelKey {
 }
 
 impl<'a> TryInto<CelKey> for CelType {
-    type Error = ();
+    type Error = InterpreterError;
 
     #[inline(always)]
     fn try_into(self) -> Result<CelKey, Self::Error> {
@@ -35,7 +37,7 @@ impl<'a> TryInto<CelKey> for CelType {
             CelType::UInt(v) => Ok(CelKey::Uint(v)),
             CelType::String(v) => Ok(CelKey::String(v)),
             CelType::Bool(v) => Ok(CelKey::Bool(v)),
-            _ => unimplemented!(),
+            _ => Err(InterpreterError::TypeTranslationError),
         }
     }
 }
@@ -59,24 +61,24 @@ pub enum CelType {
 
 impl<'a> CelType {
     #[inline(always)]
-    pub fn resolve(expr: &'a Expression, ctx: &Context) -> CelType {
-        match expr {
+    pub fn resolve(expr: &'a Expression, ctx: &Context) -> Result<CelType, InterpreterError> {
+        let cel_type = match expr {
             Expression::Atom(atom) => atom.into(),
             Expression::Arithmetic(left, op, right) => {
-                let left = CelType::resolve(left, ctx);
-                let right = CelType::resolve(right, ctx);
+                let left = CelType::resolve(left, ctx)?;
+                let right = CelType::resolve(right, ctx)?;
 
                 match op {
-                    ArithmeticOp::Add => left + right,
-                    ArithmeticOp::Subtract => left - right,
-                    ArithmeticOp::Divide => left / right,
-                    ArithmeticOp::Multiply => left * right,
-                    ArithmeticOp::Modulus => left % right,
+                    ArithmeticOp::Add => (left + right)?,
+                    ArithmeticOp::Subtract => (left - right)?,
+                    ArithmeticOp::Divide => (left / right)?,
+                    ArithmeticOp::Multiply => (left * right)?,
+                    ArithmeticOp::Modulus => (left % right)?,
                 }
             }
             Expression::Relation(left, op, right) => {
-                let left = CelType::resolve(left, ctx);
-                let right = CelType::resolve(right, ctx);
+                let left = CelType::resolve(left, ctx)?;
+                let right = CelType::resolve(right, ctx)?;
                 let res = match op {
                     RelationOp::LessThan => left < right,
                     RelationOp::LessThanEq => left <= right,
@@ -85,82 +87,85 @@ impl<'a> CelType {
                     RelationOp::Equals => right.eq(&left),
                     RelationOp::NotEquals => right.ne(&left),
                     RelationOp::In => match (left, right) {
-                        (CelType::String(l), CelType::String(r)) => r.contains(&*l),
+                        (CelType::String(l), CelType::String(r)) => r.contains(l.as_str()),
                         (any, CelType::List(v)) => v.contains(&any),
-                        (any, CelType::Map(m)) => m.map.contains_key(&any.try_into().unwrap()),
-                        _ => unimplemented!(),
+                        (any, CelType::Map(m)) => m.map.contains_key(&any.try_into()?),
+                        _ => return Err(InterpreterError::OperandMismatch)
                     },
                 };
                 CelType::Bool(res)
             }
             Expression::Ternary(cond, left, right) => {
-                let cond = CelType::resolve(cond, ctx);
+                let cond = CelType::resolve(cond, ctx)?;
                 if cond.to_bool() {
-                    CelType::resolve(left, ctx)
+                    CelType::resolve(left, ctx)?
                 } else {
-                    CelType::resolve(right, ctx)
+                    CelType::resolve(right, ctx)?
                 }
             }
             Expression::Or(left, right) => {
-                let left = CelType::resolve(left, ctx);
+                let left = CelType::resolve(left, ctx)?;
                 if left.to_bool() {
                     left
                 } else {
-                    CelType::resolve(right, ctx)
+                    CelType::resolve(right, ctx)?
                 }
             }
             Expression::And(left, right) => {
-                let left = CelType::resolve(left, ctx);
-                let right = CelType::resolve(right, ctx);
+                let left = CelType::resolve(left, ctx)?;
+                let right = CelType::resolve(right, ctx)?;
                 CelType::Bool(left.to_bool() && right.to_bool())
             }
             Expression::Unary(op, expr) => {
-                let expr = CelType::resolve(expr, ctx);
+                let expr = CelType::resolve(expr, ctx)?;
                 match op {
                     UnaryOp::Not => CelType::Bool(!expr.to_bool()),
                     UnaryOp::DoubleNot => CelType::Bool(expr.to_bool()),
                     UnaryOp::Minus => match expr {
                         CelType::Int(i) => CelType::Int(-i),
                         CelType::Float(i) => CelType::Float(-i),
-                        _ => unimplemented!(),
+                        _ => return Err(InterpreterError::OperandMismatch),
                     },
                     UnaryOp::DoubleMinus => match expr {
                         CelType::Int(_) => expr,
                         CelType::UInt(_) => expr,
                         CelType::Float(_) => expr,
-                        _ => unimplemented!(),
+                        _ => return Err(InterpreterError::OperandMismatch),
                     },
                 }
             }
             Expression::Member(left, right) => {
-                let left = CelType::resolve(left, ctx);
-                left.member(right, ctx)
+                let left = CelType::resolve(left, ctx)?;
+                left.member(right, ctx)?
             }
             Expression::List(items) => {
-                let list = items.iter().map(|i| CelType::resolve(i, ctx)).collect();
+                let list = items.iter().map(|i| CelType::resolve(i, ctx)).collect::<Result<Rc<[CelType]>,_>>()?;
                 CelType::List(list)
             }
             Expression::Map(items) => {
-                let map: HashMap<CelKey, CelType> = items
+                let map = items
                     .iter()
                     .map(|(k, v)| {
-                        let key = CelType::resolve(k, ctx).try_into().unwrap();
-                        let value = CelType::resolve(v, ctx);
-                        (key, value)
+                        let key = CelType::resolve(k, ctx).and_then(|c| c.try_into())?;
+                        let value = CelType::resolve(v, ctx)?;
+                        Ok((key, value))
                     })
-                    .collect();
+                    .collect::<Result<HashMap<CelKey, CelType>, _>>()?;
+                    
                 CelType::Map(CelMap { map: Rc::from(map) })
             }
             Expression::Ident(name) => {
-                if ctx.functions.contains_key(&**name) {
+                if ctx.functions.contains_key(name.as_str()) {
                     CelType::Function(name.clone(), None)
-                } else if ctx.variables.contains_key(&***name) {
-                    ctx.variables.get(&***name).unwrap().clone()
+                } else if ctx.variables.contains_key(name.as_str()) {
+                    ctx.variables.get(name.as_str()).unwrap().clone()
                 } else {
-                    unreachable!("Unknown variable yo")
+                    return Err(InterpreterError::UnknownVariable{variable_name: name.as_ref().to_owned()})
                 }
             }
-        }
+        };
+
+        Ok(cel_type)
     }
 
     // >> a(b)
@@ -172,45 +177,46 @@ impl<'a> CelType {
     //        FunctionCall([Ident("c")]))
 
     #[inline(always)]
-    fn member(self, member: &Member, ctx: &Context) -> CelType {
-        match member {
+    fn member(self, member: &Member, ctx: &Context) -> Result<CelType, InterpreterError> {
+        let cel_type = match member {
             Member::Index(idx) => {
-                let idx = CelType::resolve(idx, ctx);
+                let idx = CelType::resolve(idx, ctx)?;
                 match (self, idx) {
                     (CelType::List(items), CelType::Int(idx)) => {
-                        items.get(idx as usize).unwrap().clone()
+                        items.get(idx as usize).ok_or(InterpreterError::IndexBoundsError)?.clone()
                     }
-                    _ => unimplemented!(),
+                    _ => return Err(InterpreterError::OperandMismatch),
                 }
             }
-            Member::Fields(_) => unimplemented!(),
+            Member::Fields(_) => return Err(InterpreterError::OperandMismatch),
             Member::Attribute(name) => {
-                if ctx.functions.contains_key(&***name) {
+                if ctx.functions.contains_key(name.as_str()) {
                     CelType::Function(name.clone(), Some(self.into()))
                 } else {
-                    unreachable!();
+                    return Err(InterpreterError::UnknownVariable{variable_name: (name.as_str()).to_owned()})
                 }
             }
             Member::FunctionCall(args) => {
                 if let CelType::Function(name, target) = self {
-                    let func = ctx.functions.get(&*name).unwrap();
+                    let func = ctx.functions.get(name.as_str()).ok_or(InterpreterError::UnknownVariable{variable_name: name.as_ref().to_owned() })?;
                     match target {
                         None => {
                             // Strange case, a function with no arguments...!
                             if args.is_empty() {
-                                func(None, args, ctx)
+                                func(None, args, ctx)?
                             } else {
-                                let first_arg = CelType::resolve(&args[0], ctx);
-                                func(Some(&first_arg), &args[1..args.len()], ctx)
+                                let first_arg = CelType::resolve(&args[0], ctx)?;
+                                func(Some(&first_arg), &args[1..args.len()], ctx)?
                             }
                         }
-                        Some(t) => func(Some(t.as_ref()), args, ctx),
+                        Some(t) => func(Some(t.as_ref()), args, ctx)?,
                     }
                 } else {
                     unreachable!("FunctionCall without CelType::Function - {:?}", self)
                 }
             }
-        }
+        };
+        return Ok(cel_type);
     }
 
     #[inline(always)]
@@ -246,11 +252,11 @@ impl From<&Atom> for CelType {
 }
 
 impl ops::Add<CelType> for CelType {
-    type Output = CelType;
+    type Output = Result<CelType, InterpreterError>;
 
     #[inline(always)]
     fn add(self, rhs: CelType) -> Self::Output {
-        match (self, rhs) {
+        let result = match (self, rhs) {
             (CelType::Int(l), CelType::Int(r)) => CelType::Int(l + r),
             (CelType::UInt(l), CelType::UInt(r)) => CelType::UInt(l + r),
 
@@ -272,17 +278,19 @@ impl ops::Add<CelType> for CelType {
                 new.push_str(&r);
                 CelType::String(new.into())
             }
-            _ => unimplemented!(),
-        }
+            _ => return Err(InterpreterError::OperandMismatch),
+        };
+
+        Ok(result)
     }
 }
 
 impl ops::Sub<CelType> for CelType {
-    type Output = CelType;
+    type Output = Result<CelType, InterpreterError>;
 
     #[inline(always)]
     fn sub(self, rhs: CelType) -> Self::Output {
-        match (self, rhs) {
+        let result = match (self, rhs) {
             (CelType::Int(l), CelType::Int(r)) => CelType::Int(l - r),
             (CelType::UInt(l), CelType::UInt(r)) => CelType::UInt(l - r),
 
@@ -293,17 +301,18 @@ impl ops::Sub<CelType> for CelType {
             (CelType::UInt(l), CelType::Float(r)) => CelType::Float(l as f64 - r),
             (CelType::Float(l), CelType::UInt(r)) => CelType::Float(l - r as f64),
 
-            _ => unimplemented!(),
-        }
+            _ => return Err(InterpreterError::OperatorNotImplemented{operator: "sub"}),
+        };
+        Ok(result)
     }
 }
 
 impl ops::Div<CelType> for CelType {
-    type Output = CelType;
+    type Output = Result<CelType, InterpreterError>;
 
     #[inline(always)]
     fn div(self, rhs: CelType) -> Self::Output {
-        match (self, rhs) {
+        let result = match (self, rhs) {
             (CelType::Int(l), CelType::Int(r)) => CelType::Int(l / r),
             (CelType::UInt(l), CelType::UInt(r)) => CelType::UInt(l / r),
 
@@ -314,17 +323,18 @@ impl ops::Div<CelType> for CelType {
             (CelType::UInt(l), CelType::Float(r)) => CelType::Float(l as f64 / r),
             (CelType::Float(l), CelType::UInt(r)) => CelType::Float(l / r as f64),
 
-            _ => unimplemented!(),
-        }
+            _ => return Err(InterpreterError::OperatorNotImplemented{operator: "div"}),
+        };
+        Ok(result)
     }
 }
 
 impl ops::Mul<CelType> for CelType {
-    type Output = CelType;
+    type Output = Result<CelType, InterpreterError>;
 
     #[inline(always)]
     fn mul(self, rhs: CelType) -> Self::Output {
-        match (self, rhs) {
+        let result = match (self, rhs) {
             (CelType::Int(l), CelType::Int(r)) => CelType::Int(l * r),
             (CelType::UInt(l), CelType::UInt(r)) => CelType::UInt(l * r),
 
@@ -335,17 +345,18 @@ impl ops::Mul<CelType> for CelType {
             (CelType::UInt(l), CelType::Float(r)) => CelType::Float(l as f64 * r),
             (CelType::Float(l), CelType::UInt(r)) => CelType::Float(l * r as f64),
 
-            _ => unimplemented!(),
-        }
+            _ => return Err(InterpreterError::OperatorNotImplemented{operator: "mul"}),
+        };
+        Ok(result)
     }
 }
 
 impl ops::Rem<CelType> for CelType {
-    type Output = CelType;
+    type Output = Result<CelType, InterpreterError>;
 
     #[inline(always)]
     fn rem(self, rhs: CelType) -> Self::Output {
-        match (self, rhs) {
+        let result = match (self, rhs) {
             (CelType::Int(l), CelType::Int(r)) => CelType::Int(l % r),
             (CelType::UInt(l), CelType::UInt(r)) => CelType::UInt(l % r),
 
@@ -356,7 +367,8 @@ impl ops::Rem<CelType> for CelType {
             (CelType::UInt(l), CelType::Float(r)) => CelType::Float(l as f64 % r),
             (CelType::Float(l), CelType::UInt(r)) => CelType::Float(l % r as f64),
 
-            _ => unimplemented!(),
-        }
+            _ => return Err(InterpreterError::OperatorNotImplemented{operator: "rem"}),
+        };
+        Ok(result)
     }
 }
