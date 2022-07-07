@@ -185,11 +185,19 @@ impl<'a> CelType {
             }
             Member::Fields(_) => unimplemented!(),
             Member::Attribute(name) => {
-                if ctx.functions.contains_key(&***name) {
-                    CelType::Function(name.clone(), Some(self.into()))
-                } else {
-                    unreachable!();
+                // Check for property on the map
+                if let CelType::Map(map) = &self {
+                    if let Some((k, v)) = map.map.get_key_value(&CelKey::String(name.clone())) {
+                        return v.clone();
+                    }
                 }
+
+                // Check for a function
+                if ctx.functions.contains_key(&***name) {
+                    return CelType::Function(name.clone(), Some(self.into()));
+                }
+
+                unreachable!();
             }
             Member::FunctionCall(args) => {
                 if let CelType::Function(name, target) = self {
