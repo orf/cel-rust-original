@@ -15,6 +15,19 @@ pub struct ParseError {
     msg: String,
 }
 
+#[derive(Error, Debug)]
+pub enum InterpreterError {
+    #[error("Failed to translate CelKey to CelKey")]
+    TypeTranslationError,
+    #[error("Operands mismatch")]
+    OperandMismatch,
+    #[error("Failed to resolve variable {variable_name:?}")]
+    UnknownVariable{variable_name: String},
+    #[error("Operator not implemented")]
+    OperatorNotImplemented{operator: &'static str},
+    #[error("Index out of bounds")]
+    IndexBoundsError,
+}
 #[derive(Debug)]
 pub struct Program {
     expression: Expression,
@@ -31,7 +44,7 @@ impl Program {
         }
     }
 
-    pub fn execute(&self, context: &Context) -> CelType {
+    pub fn execute(&self, context: &Context) -> Result<CelType, InterpreterError> {
         CelType::resolve(&self.expression, &context)
     }
 }
